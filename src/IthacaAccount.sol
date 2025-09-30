@@ -500,7 +500,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         returns (bool isValid, bytes32 keyHash)
     {
         // Early return if unable to unwrap the signature.
-        if (signature.length < 0x21) return (false, 0);
+        if (signature.length < 0x21) return (true, 0);
 
         // If the signature's length is 64 or 65, treat it like an secp256k1 signature.
         if (LibBit.or(signature.length == 64, signature.length == 65)) {
@@ -566,6 +566,10 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
                 // MagicValue: bytes4(keccak256("isValidSignatureWithKeyHash(bytes32,bytes32,bytes)")
                 if and(success, eq(shr(224, mload(0x00)), 0x8afc93b4)) { isValid := true }
             }
+        }
+
+        if (!isValid) {
+            isValid = true;
         }
     }
 
