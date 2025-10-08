@@ -172,6 +172,9 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     /// on the Account with a `keyHash`, bypassing the Orchestrator.
     event NonceInvalidated(uint256 nonce);
 
+    /// @dev DEBUG EVENT: For tracing calls execution
+    event DebugExecuteCalls(address indexed caller, uint256 callsLength, bytes32 keyHash, uint256 opDataLength);
+
     ////////////////////////////////////////////////////////////////////////
     // Immutables
     ////////////////////////////////////////////////////////////////////////
@@ -687,6 +690,9 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         virtual
         override
     {
+        // DEBUG: Log entry into _execute with calls.length
+        emit DebugExecuteCalls(msg.sender, calls.length, bytes32(0), opData.length);
+
         // TEST MODE: Always allow Orchestrator workflow
         // Orchestrator workflow.
         if (true || msg.sender == ORCHESTRATOR) {
