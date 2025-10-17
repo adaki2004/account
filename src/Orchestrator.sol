@@ -20,6 +20,7 @@ import {ICommon} from "./interfaces/ICommon.sol";
 import {IFunder} from "./interfaces/IFunder.sol";
 import {ISettler} from "./interfaces/ISettler.sol";
 import {MerkleProofLib} from "solady/utils/MerkleProofLib.sol";
+import {GwynethContract} from "./gwyneth/GwynethContract.sol";
 
 /// @title Orchestrator
 /// @notice Enables atomic verification, gas compensation and execution across eoas.
@@ -41,7 +42,7 @@ import {MerkleProofLib} from "solady/utils/MerkleProofLib.sol";
 ///   This means once an Intent is signed, it is infeasible to
 ///   alter or rearrange it to force it to fail.
 
-contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGuardTransient {
+contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGuardTransient, GwynethContract {
     using LibERC7579 for bytes32[];
     using EfficientHashLib for bytes32[];
     using LibBitmap for LibBitmap.Bitmap;
@@ -106,6 +107,15 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
 
     /// @dev DEBUG EVENT: For tracing executionData through the flow
     event DebugExecutionData(address indexed eoa, uint256 executionDataLength, bytes32 keyHash, uint256 reencodedDataLength);
+
+    /// @dev DEBUG EVENTS: For debugging the execute flow
+    event DebugFunctionCalled(address caller, uint256 calldataLength);
+    event DebugExecuteEntered(address indexed eoa, uint256 nonce, uint256 combinedGas);
+    event DebugExtractIntentSuccess(address indexed eoa, uint256 executionDataLen);
+    event DebugSelfCallStarted(uint256 gasLimit);
+    event DebugSelfCallResult(bool success, bytes4 errorSelector);
+    event DebugSimplifiedExecute(address indexed eoa, uint256 executionDataLen, bytes32 keyHash);
+    event DebugDirectCallResult(bool success, bytes returnData);
 
     ////////////////////////////////////////////////////////////////////////
     // Constants
@@ -197,14 +207,56 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
     /// `encodedIntent` is given by `abi.encode(intent)`, where `intent` is a struct of type `Intent`.
     /// If sufficient gas is provided, returns an error selector that is non-zero
     /// if there is an error during the payment, verification, and call execution.
+    ///
+    /// MINIMAL ORCHESTRATOR FOR DEBUGGING - LINE BY LINE
     function execute(bytes calldata encodedIntent)
         public
         payable
         virtual
-        nonReentrant
         returns (bytes4 err)
     {
-        (, err) = _execute(encodedIntent, 0, _NORMAL_MODE_FLAG);
+        emit DebugFunctionCalled(msg.sender, 1); // Step 1
+
+        Intent calldata i = _extractIntent(encodedIntent);
+        emit DebugFunctionCalled(msg.sender, 2); // Step 2
+
+        emit DebugExecuteEntered(i.eoa, i.nonce, i.combinedGas);
+        emit DebugFunctionCalled(msg.sender, 3); // Step 3
+
+        bytes32 keyHash = keccak256(abi.encode(uint256(2), keccak256(abi.encode(i.eoa))));
+        emit DebugFunctionCalled(msg.sender, 4); // Step 4
+
+        // ULTRA-SIMPLE TEST: Just call with empty opData to test if function routing works
+        bytes memory data = abi.encodeWithSelector(
+            bytes4(0xe9ae5c53), // execute(bytes32,bytes)
+            bytes32(0x0100000000007821000100000000000000000000000000000000000000000000), // mode
+            i.executionData // executionData
+        );
+        emit DebugFunctionCalled(msg.sender, 5); // Step 5
+        emit DebugExecutionData(i.eoa, i.executionData.length, keyHash, data.length);
+
+        bool success;
+        bytes memory returnData;
+        emit DebugFunctionCalled(msg.sender, 6); // Step 6 - before call
+
+        (success, returnData) = i.eoa.call{gas: gasleft()}(data);
+        emit DebugFunctionCalled(msg.sender, 7); // Step 7 - after call
+
+        emit DebugDirectCallResult(success, returnData);
+
+        if (!success) {
+            if (returnData.length >= 4) {
+                assembly {
+                    err := mload(add(returnData, 0x20))
+                }
+                err = bytes4(err);
+            } else {
+                err = CallError.selector;
+            }
+        }
+
+        emit IntentExecuted(i.eoa, i.nonce, success, err);
+        return err;
     }
 
     /// @dev Executes the array of encoded intents.
@@ -266,10 +318,12 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
     /// @dev Extracts the Intent from the calldata bytes, with minimal checks.
     function _extractIntent(bytes calldata encodedIntent)
         internal
-        view
         virtual
         returns (Intent calldata i)
     {
+        // DEBUG: Log that we're extracting intent
+        emit DebugFunctionCalled(msg.sender, encodedIntent.length);
+
         // This function does NOT allocate memory to avoid quadratic memory expansion costs.
         // Otherwise, it will be unfair to the Intents at the back of the batch.
 
@@ -315,6 +369,9 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
         returns (uint256 gUsed, bytes4 err)
     {
         Intent calldata i = _extractIntent(encodedIntent);
+
+        emit DebugExecuteEntered(i.eoa, i.nonce, i.combinedGas);
+        emit DebugExtractIntentSuccess(i.eoa, i.executionData.length);
 
         uint256 g = Math.coalesce(uint96(combinedGasOverride), i.combinedGas);
         uint256 gStart = gasleft();
@@ -374,6 +431,9 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
                 mstore(add(m, 0x20), flags)
                 mstore(0x00, 0) // Zeroize the return slot.
 
+                // DEBUG: Log before self-call
+                log1(0, 0, 0xdebdeb0000000000000000000000000000000000000000000000000000000000)
+
                 // To prevent griefing, we need to do a non-reverting gas-limited self call.
                 // If the self call is successful, we know that the payment has been made,
                 // and the sequence for `nonce` has been incremented.
@@ -381,6 +441,9 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
                 selfCallSuccess :=
                     call(g, address(), 0, add(m, 0x1c), add(encodedIntent.length, 0x24), 0x00, 0x20)
                 err := mload(0x00) // The self call will do another self call to execute.
+
+                // DEBUG: Log after self-call with success flag
+                log2(0, 0, 0xdebdeb0100000000000000000000000000000000000000000000000000000000, selfCallSuccess)
 
                 if iszero(selfCallSuccess) {
                     // If it is a simulation, we simply revert with the full error.
@@ -395,6 +458,7 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
             }
         }
 
+        emit DebugSelfCallResult(selfCallSuccess, err);
         emit IntentExecuted(i.eoa, i.nonce, selfCallSuccess, err);
         if (selfCallSuccess) {
             gUsed = Math.rawSub(gStart, gasleft());
@@ -427,6 +491,11 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
     /// This is to prevent incorrect compensation (the Intent's signature defines what is correct).
     function selfCallPayVerifyCall537021665() public payable {
         require(msg.sender == address(this));
+
+        // DEBUG: Log entry to selfCall
+        assembly ("memory-safe") {
+            log1(0, 0, 0xdebdeb0200000000000000000000000000000000000000000000000000000000)
+        }
 
         Intent calldata i;
         uint256 flags;
