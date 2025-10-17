@@ -4,6 +4,7 @@ pragma solidity ^0.8.23;
 import {LibBitmap} from "solady/utils/LibBitmap.sol";
 import {LibERC7579} from "solady/accounts/LibERC7579.sol";
 import {LibEIP7702} from "solady/accounts/LibEIP7702.sol";
+import {ERC7821} from "solady/accounts/ERC7821.sol";
 import {EfficientHashLib} from "solady/utils/EfficientHashLib.sol";
 import {ReentrancyGuardTransient} from "solady/utils/ReentrancyGuardTransient.sol";
 import {EIP712} from "solady/utils/EIP712.sol";
@@ -43,6 +44,18 @@ import {GwynethContract} from "./gwyneth/GwynethContract.sol";
 ///   alter or rearrange it to force it to fail.
 
 contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGuardTransient, GwynethContract {
+
+    /// @dev ULTRA DEBUG: Log every function call at the contract level
+    fallback() external payable {
+        assembly ("memory-safe") {
+            // Log fallback hit with function selector
+            let selector := shr(224, calldataload(0))
+            log2(0, 0, 0xFA11BAC0000000000000000000000000000000000000000000000000000000, selector)
+            // Revert with selector for debugging
+            mstore(0x00, selector)
+            revert(0x00, 0x20)
+        }
+    }
     using LibERC7579 for bytes32[];
     using EfficientHashLib for bytes32[];
     using LibBitmap for LibBitmap.Bitmap;
@@ -182,11 +195,17 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
 
             _checkAndIncrementNonce(eoa, nonce);
 
-            // This part is same as `selfCallPayVerifyCall537021665`. We simply inline to save gas.
-            bytes memory data = LibERC7579.reencodeBatchAsExecuteCalldata(
-                hex"01000000000078210001", // ERC7821 batch execution mode.
-                p.executionData,
-                abi.encode(keyHash) // `opData`.
+            // Call execute(bytes32 mode, bytes executionData) on the IthacaAccount
+            bytes32 mode = hex"01000000000078210001";
+
+            // The executionData format for ERC-7821 is: abi.encode(Call[] calls, bytes opData)
+            ERC7821.Call[] memory calls = abi.decode(p.executionData, (ERC7821.Call[]));
+            bytes memory executionData = abi.encode(calls, abi.encode(keyHash));
+
+            bytes memory data = abi.encodeWithSelector(
+                bytes4(0xe9ae5c53), // execute(bytes32,bytes) selector
+                mode,
+                executionData
             );
 
             assembly ("memory-safe") {
@@ -215,6 +234,16 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
         virtual
         returns (bytes4 err)
     {
+        // ULTRA AGGRESSIVE DEBUG: Log function entry with assembly BEFORE anything else
+        assembly ("memory-safe") {
+            // Log: 0xDEB0601 = Function entered
+            log1(0, 0, 0xDEB0601000000000000000000000000000000000000000000000000000000000)
+            // Log calldata size
+            log2(0, 0, 0xDEB0602000000000000000000000000000000000000000000000000000000000, calldatasize())
+            // Log msg.sender
+            log2(0, 0, 0xDEB0603000000000000000000000000000000000000000000000000000000000, caller())
+        }
+
         emit DebugFunctionCalled(msg.sender, 1); // Step 1
 
         Intent calldata i = _extractIntent(encodedIntent);
@@ -226,12 +255,21 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
         bytes32 keyHash = keccak256(abi.encode(uint256(2), keccak256(abi.encode(i.eoa))));
         emit DebugFunctionCalled(msg.sender, 4); // Step 4
 
-        // ULTRA-SIMPLE TEST: Just call with empty opData to test if function routing works
+        // Call execute(bytes32 mode, bytes executionData) on the IthacaAccount
+        // Mode indicates ERC7821 batch execution with opData
+        bytes32 mode = hex"01000000000078210001";
+
+        // The executionData format for ERC-7821 is: abi.encode(Call[] calls, bytes opData)
+        ERC7821.Call[] memory calls = abi.decode(i.executionData, (ERC7821.Call[]));
+        bytes memory executionData = abi.encode(calls, abi.encode(keyHash));
+
+        // Encode the full call
         bytes memory data = abi.encodeWithSelector(
-            bytes4(0xe9ae5c53), // execute(bytes32,bytes)
-            bytes32(0x0100000000007821000100000000000000000000000000000000000000000000), // mode
-            i.executionData // executionData
+            bytes4(0xe9ae5c53), // execute(bytes32,bytes) selector
+            mode,
+            executionData
         );
+
         emit DebugFunctionCalled(msg.sender, 5); // Step 5
         emit DebugExecutionData(i.eoa, i.executionData.length, keyHash, data.length);
 
@@ -580,13 +618,25 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
         // DEBUG: Log executionData length BEFORE re-encoding
         emit DebugExecutionData(eoa, i.executionData.length, keyHash, 0);
 
-        // This re-encodes the ERC7579 `executionData` with the optional `opData`.
-        // We expect that the account supports ERC7821
-        // (an extension of ERC7579 tailored for 7702 accounts).
-        bytes memory data = LibERC7579.reencodeBatchAsExecuteCalldata(
-            hex"01000000000078210001", // ERC7821 batch execution mode.
-            i.executionData,
-            abi.encode(keyHash) // `opData`.
+        // Call execute(bytes32 mode, bytes executionData) on the IthacaAccount
+        // Mode indicates ERC7821 batch execution with opData
+        bytes32 mode = hex"01000000000078210001";
+
+        // The executionData format for ERC-7821 is: abi.encode(Call[] calls, bytes opData)
+        // We need to decode the original executionData to get the calls array,
+        // then re-encode with both calls and opData
+
+        // Decode calls from original executionData
+        ERC7821.Call[] memory calls = abi.decode(i.executionData, (ERC7821.Call[]));
+
+        // Encode both calls and opData together (proper ABI tuple encoding)
+        bytes memory executionData = abi.encode(calls, abi.encode(keyHash));
+
+        // Encode the full call with correct selector
+        bytes memory data = abi.encodeWithSelector(
+            bytes4(0xe9ae5c53), // execute(bytes32,bytes) selector
+            mode,
+            executionData
         );
 
         // DEBUG: Log data length AFTER re-encoding
@@ -635,11 +685,17 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
 
             _checkAndIncrementNonce(eoa, nonce);
 
-            // This part is same as `selfCallPayVerifyCall537021665`. We simply inline to save gas.
-            bytes memory data = LibERC7579.reencodeBatchAsExecuteCalldata(
-                hex"01000000000078210001", // ERC7821 batch execution mode.
-                p.executionData,
-                abi.encode(keyHash) // `opData`.
+            // Call execute(bytes32 mode, bytes executionData) on the IthacaAccount
+            bytes32 mode = hex"01000000000078210001";
+
+            // The executionData format for ERC-7821 is: abi.encode(Call[] calls, bytes opData)
+            ERC7821.Call[] memory calls = abi.decode(p.executionData, (ERC7821.Call[]));
+            bytes memory executionData = abi.encode(calls, abi.encode(keyHash));
+
+            bytes memory data = abi.encodeWithSelector(
+                bytes4(0xe9ae5c53), // execute(bytes32,bytes) selector
+                mode,
+                executionData
             );
 
             assembly ("memory-safe") {
@@ -921,18 +977,4 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
         version = "0.5.5";
     }
 
-    ////////////////////////////////////////////////////////////////////////
-    // Other Overrides
-    ////////////////////////////////////////////////////////////////////////
-
-    /// @dev There won't be chains that have 7702 and without TSTORE.
-    function _useTransientReentrancyGuardOnlyOnMainnet()
-        internal
-        view
-        virtual
-        override
-        returns (bool)
-    {
-        return false;
-    }
 }

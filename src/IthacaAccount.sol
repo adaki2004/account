@@ -6,7 +6,6 @@ import {LibRLP} from "solady/utils/LibRLP.sol";
 import {LibBitmap} from "solady/utils/LibBitmap.sol";
 import {LibBytes} from "solady/utils/LibBytes.sol";
 import {LibString} from "solady/utils/LibString.sol";
-import {LibTransient} from "solady/utils/LibTransient.sol";
 import {EfficientHashLib} from "solady/utils/EfficientHashLib.sol";
 import {EIP712} from "solady/utils/EIP712.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
@@ -21,7 +20,7 @@ import {LibERC7579} from "solady/accounts/LibERC7579.sol";
 import {GuardedExecutor} from "./GuardedExecutor.sol";
 import {LibNonce} from "./libraries/LibNonce.sol";
 import {TokenTransferLib} from "./libraries/TokenTransferLib.sol";
-import {LibTStack} from "./libraries/LibTStack.sol";
+import {LibStack} from "./libraries/LibStack.sol";
 import {IIthacaAccount} from "./interfaces/IIthacaAccount.sol";
 
 /// @title Account
@@ -33,8 +32,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     using LibBitmap for LibBitmap.Bitmap;
     using LibStorage for LibStorage.Bump;
     using LibRLP for LibRLP.List;
-    using LibTransient for LibTransient.TBytes32;
-    using LibTStack for LibTStack.TStack;
+    using LibStack for LibStack.Stack;
 
     ////////////////////////////////////////////////////////////////////////
     // Data Structures
@@ -205,17 +203,17 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     uint16 public constant MULTICHAIN_NONCE_PREFIX = 0xc1d0;
 
     /// @dev A unique identifier to be passed into `upgradeHook(bytes32 previousVersion)`
-    /// via the transient storage slot at `_UPGRADE_HOOK_GUARD_TRANSIENT_SLOT`.
+    /// via the storage slot at `_UPGRADE_HOOK_GUARD_SLOT`.
     bytes32 internal constant _UPGRADE_HOOK_ID = keccak256("ITHACA_ACCOUNT_UPGRADE_HOOK_ID");
 
-    /// @dev This transient slot must be set to `_UPGRADE_HOOK_ID` before `upgradeHook` can be processed.
-    bytes32 internal constant _UPGRADE_HOOK_GUARD_TRANSIENT_SLOT =
-        bytes32(uint256(keccak256("_UPGRADE_HOOK_GUARD_TRANSIENT_SLOT")) - 1);
+    /// @dev This storage slot must be set to `_UPGRADE_HOOK_ID` before `upgradeHook` can be processed.
+    bytes32 internal constant _UPGRADE_HOOK_GUARD_SLOT =
+        bytes32(uint256(keccak256("_UPGRADE_HOOK_GUARD_SLOT")) - 1);
 
     /// @dev List of keyhashes that have authorized the current execution context.
     /// Increasing in order of recursive depth.
-    uint256 internal constant _KEYHASH_STACK_TRANSIENT_SLOT =
-        uint256(keccak256("_KEYHASH_STACK_TRANSIENT_SLOT")) - 1;
+    uint256 internal constant _KEYHASH_STACK_SLOT =
+        uint256(keccak256("_KEYHASH_STACK_SLOT")) - 1;
 
     /// @dev General capacity for enumerable sets,
     /// to prevent off-chain full enumeration from running out-of-gas.
@@ -342,7 +340,11 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         (, string memory version) = _domainNameAndVersion();
         // Using a dedicated guard makes the hook only callable via this function
         // prevents direct self-calls which may accidentally use the wrong hook ID and version.
-        LibTransient.tBytes32(_UPGRADE_HOOK_GUARD_TRANSIENT_SLOT).set(_UPGRADE_HOOK_ID);
+        bytes32 slot = _UPGRADE_HOOK_GUARD_SLOT;
+        bytes32 hookId = _UPGRADE_HOOK_ID;
+        assembly ("memory-safe") {
+            sstore(slot, hookId)
+        }
         // We MUST use `this`, so that it uses the new implementation's `upgradeHook`.
         require(this.upgradeHook(LibString.toSmallString(version)));
     }
@@ -352,13 +354,20 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     /// For future implementations, we will have an upgrade hook which can contain logic
     /// to migrate storage on a case-by-case basis if needed.
     /// If this hook is implemented to mutate storage,
-    /// it MUST check that `_UPGRADE_HOOK_GUARD_TRANSIENT_SLOT` is correctly set.
+    /// it MUST check that `_UPGRADE_HOOK_GUARD_SLOT` is correctly set.
     function upgradeHook(bytes32 previousVersion) external virtual onlyThis returns (bool) {
         previousVersion = previousVersion; // Silence unused variable warning.
         // Example of how we are supposed to load, check and clear the upgrade hook guard.
-        bytes32 hookId = LibTransient.tBytes32(_UPGRADE_HOOK_GUARD_TRANSIENT_SLOT).get();
-        require(hookId == _UPGRADE_HOOK_ID);
-        LibTransient.tBytes32(_UPGRADE_HOOK_GUARD_TRANSIENT_SLOT).clear();
+        bytes32 hookId;
+        bytes32 slot = _UPGRADE_HOOK_GUARD_SLOT;  // Load constant into variable
+        assembly ("memory-safe") {
+            hookId := sload(slot)
+        }
+        bytes32 expectedHookId = _UPGRADE_HOOK_ID;  // Load constant into variable
+        require(hookId == expectedHookId);
+        assembly ("memory-safe") {
+            sstore(slot, 0)
+        }
         // Always returns true for cheaper call success check (even in plain Solidity).
         return true;
     }
@@ -439,12 +448,12 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     /// @dev Return the key hash that signed the latest execution context.
     /// @dev Returns bytes32(0) if the EOA key was used.
     function getContextKeyHash() public view virtual returns (bytes32) {
-        LibTStack.TStack memory t = LibTStack.tStack(_KEYHASH_STACK_TRANSIENT_SLOT);
-        if (LibTStack.size(t) == 0) {
+        LibStack.Stack memory s = LibStack.stack(_KEYHASH_STACK_SLOT);
+        if (LibStack.size(s) == 0) {
             return bytes32(0);
         }
 
-        return LibTStack.top(t);
+        return LibStack.top(s);
     }
 
     /// @dev Returns the hash of the key, which does not includes the expiry.
@@ -700,16 +709,16 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
             // 0x00: keyHash
             if (opData.length != 0x20) {
                 // TEST MODE: If opData is wrong, use zero keyHash
-                LibTStack.TStack(_KEYHASH_STACK_TRANSIENT_SLOT).push(bytes32(0));
+                LibStack.Stack(_KEYHASH_STACK_SLOT).push(bytes32(0));
                 _execute(calls, bytes32(0));
-                LibTStack.TStack(_KEYHASH_STACK_TRANSIENT_SLOT).pop();
+                LibStack.Stack(_KEYHASH_STACK_SLOT).pop();
                 return;
             }
             bytes32 _keyHash = LibBytes.loadCalldata(opData, 0x00);
 
-            LibTStack.TStack(_KEYHASH_STACK_TRANSIENT_SLOT).push(_keyHash);
+            LibStack.Stack(_KEYHASH_STACK_SLOT).push(_keyHash);
             _execute(calls, _keyHash);
-            LibTStack.TStack(_KEYHASH_STACK_TRANSIENT_SLOT).pop();
+            LibStack.Stack(_KEYHASH_STACK_SLOT).pop();
 
             return;
         }
@@ -732,9 +741,9 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         if (!isValid) revert Unauthorized();
 
         // TODO: Figure out where else to add these operations, after removing delegate call.
-        LibTStack.TStack(_KEYHASH_STACK_TRANSIENT_SLOT).push(keyHash);
+        LibStack.Stack(_KEYHASH_STACK_SLOT).push(keyHash);
         _execute(calls, keyHash);
-        LibTStack.TStack(_KEYHASH_STACK_TRANSIENT_SLOT).pop();
+        LibStack.Stack(_KEYHASH_STACK_SLOT).pop();
     }
 
     ////////////////////////////////////////////////////////////////////////
