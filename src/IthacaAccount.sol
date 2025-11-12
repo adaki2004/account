@@ -22,10 +22,11 @@ import {LibNonce} from "./libraries/LibNonce.sol";
 import {TokenTransferLib} from "./libraries/TokenTransferLib.sol";
 import {LibStack} from "./libraries/LibStack.sol";
 import {IIthacaAccount} from "./interfaces/IIthacaAccount.sol";
+import {GwynethContract} from "./gwyneth/GwynethContract.sol";
 
 /// @title Account
 /// @notice A account contract for EOAs with EIP7702.
-contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
+contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor, GwynethContract {
     using EfficientHashLib for bytes32[];
     using EnumerableSetLib for *;
     using LibBytes for LibBytes.BytesStorage;

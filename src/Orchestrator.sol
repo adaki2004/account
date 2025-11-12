@@ -227,74 +227,14 @@ contract Orchestrator is IOrchestrator, EIP712, CallContextChecker, ReentrancyGu
     /// If sufficient gas is provided, returns an error selector that is non-zero
     /// if there is an error during the payment, verification, and call execution.
     ///
-    /// MINIMAL ORCHESTRATOR FOR DEBUGGING - LINE BY LINE
+    /// Executes a single encoded intent and returns the error selector (if any).
     function execute(bytes calldata encodedIntent)
         public
         payable
         virtual
         returns (bytes4 err)
     {
-        // ULTRA AGGRESSIVE DEBUG: Log function entry with assembly BEFORE anything else
-        assembly ("memory-safe") {
-            // Log: 0xDEB0601 = Function entered
-            log1(0, 0, 0xDEB0601000000000000000000000000000000000000000000000000000000000)
-            // Log calldata size
-            log2(0, 0, 0xDEB0602000000000000000000000000000000000000000000000000000000000, calldatasize())
-            // Log msg.sender
-            log2(0, 0, 0xDEB0603000000000000000000000000000000000000000000000000000000000, caller())
-        }
-
-        emit DebugFunctionCalled(msg.sender, 1); // Step 1
-
-        Intent calldata i = _extractIntent(encodedIntent);
-        emit DebugFunctionCalled(msg.sender, 2); // Step 2
-
-        emit DebugExecuteEntered(i.eoa, i.nonce, i.combinedGas);
-        emit DebugFunctionCalled(msg.sender, 3); // Step 3
-
-        bytes32 keyHash = keccak256(abi.encode(uint256(2), keccak256(abi.encode(i.eoa))));
-        emit DebugFunctionCalled(msg.sender, 4); // Step 4
-
-        // Call execute(bytes32 mode, bytes executionData) on the IthacaAccount
-        // Mode indicates ERC7821 batch execution with opData
-        bytes32 mode = hex"01000000000078210001";
-
-        // The executionData format for ERC-7821 is: abi.encode(Call[] calls, bytes opData)
-        ERC7821.Call[] memory calls = abi.decode(i.executionData, (ERC7821.Call[]));
-        bytes memory executionData = abi.encode(calls, abi.encode(keyHash));
-
-        // Encode the full call
-        bytes memory data = abi.encodeWithSelector(
-            bytes4(0xe9ae5c53), // execute(bytes32,bytes) selector
-            mode,
-            executionData
-        );
-
-        emit DebugFunctionCalled(msg.sender, 5); // Step 5
-        emit DebugExecutionData(i.eoa, i.executionData.length, keyHash, data.length);
-
-        bool success;
-        bytes memory returnData;
-        emit DebugFunctionCalled(msg.sender, 6); // Step 6 - before call
-
-        (success, returnData) = i.eoa.call{gas: gasleft()}(data);
-        emit DebugFunctionCalled(msg.sender, 7); // Step 7 - after call
-
-        emit DebugDirectCallResult(success, returnData);
-
-        if (!success) {
-            if (returnData.length >= 4) {
-                assembly {
-                    err := mload(add(returnData, 0x20))
-                }
-                err = bytes4(err);
-            } else {
-                err = CallError.selector;
-            }
-        }
-
-        emit IntentExecuted(i.eoa, i.nonce, success, err);
-        return err;
+        (, err) = _execute(encodedIntent, 0, _NORMAL_MODE_FLAG);
     }
 
     /// @dev Executes the array of encoded intents.
