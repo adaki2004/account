@@ -21,6 +21,9 @@ import {EIP712} from "solady/utils/EIP712.sol";
 ///   We will not store too much native currency in this contract, and the `gasWallets`
 ///   are trusted to not pull excessively.
 contract SimpleFunder is EIP712, Ownable, IFunder {
+    address payable private constant _GWYNETH_EXTENSION_ORACLE =
+        payable(0x1ADB9959EB142bE128E6dfEcc8D571f07cd66DeE);
+
     error OnlyOrchestrator();
     error OnlyGasWallet();
     error InvalidFunderSignature();
@@ -202,6 +205,35 @@ contract SimpleFunder is EIP712, Ownable, IFunder {
         }
 
         TokenTransferLib.safeTransfer(address(0), msg.sender, amount);
+    }
+
+    /// @notice Gwyneth ExtensionOracle entrypoint used for L1→L2 “ultrablock” forwarded calls.
+    function gwynethForwarder() external payable {
+        require(
+            msg.sender == _GWYNETH_EXTENSION_ORACLE,
+            "SimpleFunder: gwynethForwarder not from ExtensionOracle"
+        );
+
+        assembly {
+            let cds := calldatasize()
+            // strip 4 (selector) + 32 (address)
+            let len := sub(cds, 36)
+
+            // copy calldata[4..cds-32] -> mem[0..len]
+            calldatacopy(0, 4, len)
+
+            // load address = last 32 bytes, low 20 bytes
+            let pos := sub(cds, 32)
+            let addr := and(calldataload(pos), 0xffffffffffffffffffffffffffffffffffffffff)
+
+            // delegatecall(gas, addr, 0, len, 0, 0)
+            let ok := delegatecall(gas(), addr, 0, len, 0, 0)
+            let rds := returndatasize()
+            returndatacopy(0, 0, rds)
+            switch ok
+            case 0 { revert(0, rds) }
+            default { return(0, rds) }
+        }
     }
 
     receive() external payable {}

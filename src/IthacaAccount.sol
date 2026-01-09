@@ -183,6 +183,11 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     // Constants
     ////////////////////////////////////////////////////////////////////////
 
+    /// @dev Gwyneth ExtensionOracle (L1) address that is allowed to invoke `gwynethForwarder`.
+    /// This is a deterministic deployment on the Gwyneth devnet (chainId 160010).
+    address payable private constant _GWYNETH_EXTENSION_ORACLE =
+        payable(0x1ADB9959EB142bE128E6dfEcc8D571f07cd66DeE);
+
     /// @dev For EIP712 signature digest calculation for the `execute` function.
     bytes32 public constant EXECUTE_TYPEHASH = keccak256(
         "Execute(bool multichain,Call[] calls,uint256 nonce)Call(address to,uint256 value,bytes data)"
@@ -217,6 +222,36 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     /// @dev General capacity for enumerable sets,
     /// to prevent off-chain full enumeration from running out-of-gas.
     uint256 internal constant _CAP = 512;
+
+    ////////////////////////////////////////////////////////////////////////
+    // Gwyneth Forwarder
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @notice Gwyneth ExtensionOracle entrypoint used for L1→L2 “ultrablock” forwarded calls.
+    /// @dev Mirrors `packages/protocol/contracts/gwyneth/GwynethContract.sol`.
+    function gwynethForwarder() external payable {
+        if (msg.sender != _GWYNETH_EXTENSION_ORACLE) revert Unauthorized();
+
+        assembly ("memory-safe") {
+            let cds := calldatasize()
+            let len := sub(cds, 36) // strip 4 (selector) + 32 (address)
+
+            // copy calldata[4..cds-32] -> mem[0..len]
+            calldatacopy(0, 4, len)
+
+            // load address = last 32 bytes, low 20 bytes
+            let pos := sub(cds, 32)
+            let addr := and(calldataload(pos), 0xffffffffffffffffffffffffffffffffffffffff)
+
+            // delegatecall(gas, addr, 0, len, 0, 0)
+            let ok := delegatecall(gas(), addr, 0, len, 0, 0)
+            let rds := returndatasize()
+            returndatacopy(0, 0, rds)
+            switch ok
+            case 0 { revert(0, rds) }
+            default { return(0, rds) }
+        }
+    }
 
     ////////////////////////////////////////////////////////////////////////
     // Constructor
